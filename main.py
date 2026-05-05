@@ -614,37 +614,104 @@ class TreeTab(ttk.Frame):
         if not path:
             return
         try:
-            import tempfile, os
-            from PIL import Image
-            x1, y1, x2, y2 = self.canvas.bbox("all")
-            with tempfile.NamedTemporaryFile(suffix=".eps", delete=False) as tmp:
-                tmp_path = tmp.name
-            try:
-                scale = 3  # Увеличиваем разрешение в 3 раза
-                self.canvas.postscript(
-                    file=tmp_path,
-                    colormode="color",
-                    x=x1, y=y1,
-                    width=x2 - x1,
-                    height=y2 - y1,
-                    pagewidth=(x2 - x1) * scale,
-                    pageheight=(y2 - y1) * scale,
+            import textwrap
+            from PIL import Image, ImageDraw, ImageFont
+
+            es = self.app.expert_system
+            if not es.questions or not es.outcomes:
+                return
+
+            SCALE = 2
+            NW = self.NODE_W * SCALE
+            NH = self.NODE_H * SCALE
+            HGAP = self.H_GAP * SCALE
+            VGAP = self.V_GAP * SCALE
+            FONT_SIZE = 16 * SCALE
+
+            n_leaves = 1
+            for q in es.questions:
+                n_leaves *= len(q.get("answers", _DEFAULT_ANSWERS))
+            n_q = len(es.questions)
+            tree_w = int(max(n_leaves * (NW + HGAP), NW + HGAP))
+            tree_h = int((n_q + 1) * (NH + VGAP) + 80 * SCALE)
+
+            # Пробуем загрузить системный шрифт; если не удастся — встроенный
+            font = None
+            for fp in [
+                "C:/Windows/Fonts/arial.ttf",
+                "/System/Library/Fonts/Supplemental/Arial.ttf",
+                "/Library/Fonts/Arial.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            ]:
+                try:
+                    font = ImageFont.truetype(fp, FONT_SIZE)
+                    break
+                except Exception:
+                    pass
+            if font is None:
+                font = ImageFont.load_default()
+
+            img = Image.new("RGB", (tree_w, tree_h), "white")
+            draw = ImageDraw.Draw(img)
+
+            def outlined_text(x, y, text):
+                for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    draw.multiline_text(
+                        (x + dx, y + dy), text, fill="black",
+                        font=font, anchor="mm", align="center",
+                    )
+                draw.multiline_text(
+                    (x, y), text, fill="white",
+                    font=font, anchor="mm", align="center",
                 )
-                img = Image.open(tmp_path)
-                img.load()
-                img.save(path, "PNG")
-            finally:
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
+
+            def draw_node(x, y, q_idx, answers, half_width):
+                x, y, half_width = int(x), int(y), int(half_width)
+                if q_idx >= len(es.questions):
+                    posteriors = es.compute_posteriors(answers)
+                    if posteriors:
+                        name = '\n'.join(textwrap.wrap(posteriors[0][0], 18))
+                        text = f"{name}\n{posteriors[0][1] * 100:.1f}%"
+                    else:
+                        text = "?"
+                    draw.rectangle(
+                        [x - NW // 2, y, x + NW // 2, y + NH],
+                        fill="#90EE90", outline="#2E8B57", width=2 * SCALE,
+                    )
+                    outlined_text(x, y + NH // 2, text)
+                    return
+
+                q = es.questions[q_idx]
+                label = "\n".join(textwrap.wrap(f"Q{q['id']}: {q['text']}", 20))
+                draw.rectangle(
+                    [x - NW // 2, y, x + NW // 2, y + NH],
+                    fill="#87CEEB", outline="#4682B4", width=2 * SCALE,
+                )
+                outlined_text(x, y + NH // 2, label)
+
+                choices = q.get("answers", list(_DEFAULT_ANSWERS))
+                n = len(choices)
+                child_y = y + NH + VGAP
+                child_half = half_width / n
+                for i, choice in enumerate(choices):
+                    child_x = x - half_width + child_half * (2 * i + 1)
+                    child_answers = dict(answers)
+                    child_answers[str(q["id"])] = choice.get("value", 0.5)
+                    draw.line(
+                        [(x, y + NH), (int(child_x), int(child_y))],
+                        fill="#555555", width=SCALE,
+                    )
+                    mid_x = int((x + child_x) / 2)
+                    mid_y = int((y + NH + child_y) / 2)
+                    outlined_text(mid_x, mid_y, choice["text"])
+                    draw_node(child_x, child_y, q_idx + 1, child_answers, child_half)
+
+            draw_node(tree_w / 2, 30 * SCALE, 0, {}, tree_w / 2)
+            img.save(path, "PNG")
             messagebox.showinfo("Сохранено", f"Дерево сохранено в:\n{path}")
         except Exception as e:
-            messagebox.showerror(
-                "Ошибка",
-                f"Не удалось сохранить: {e}\n\n"
-                "Убедитесь, что установлен Ghostscript:\n"
-                "  Windows: https://www.ghostscript.com/download\n"
-                "  macOS: brew install ghostscript",
-            )
+            messagebox.showerror("Ошибка", f"Не удалось сохранить: {e}")
 
     def _draw_tree(self):
         es = self.app.expert_system
