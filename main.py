@@ -4,7 +4,7 @@
 import json
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import copy
+# import copy
 import math
 
 
@@ -59,7 +59,7 @@ class ExpertSystem:
         log_posteriors = [math.log(max(p, 1e-15)) for p in priors]
 
         for qid_str, answer in answers.items():
-            p_yes = (answer + 5) / 10.0  # Нормализуем ответ в [0, 1]
+            p_yes = float(answer)  # Значение ответа уже в диапазоне [0, 1]
             for i, o in enumerate(self.outcomes):
                 c = o.get("coefficients", {}).get(qid_str, 0.5)
                 # Правдоподобие: P(answer | H_i) = c * p_yes + (1 - c) * (1 - p_yes)
@@ -81,23 +81,26 @@ class ExpertSystem:
 
 # ─── Диалоги ─────────────────────────────────────────────────────────────────
 
-class QuestionDialog(tk.Toplevel):
-    """Диалог добавления/редактирования вопроса."""
+_DEFAULT_ANSWERS = [{"text": "Да", "value": 1.0}, {"text": "Нет", "value": 0.0}]
 
-    def __init__(self, parent, question=None):
+
+class AnswerChoiceDialog(tk.Toplevel):
+    """Диалог добавления варианта ответа для вопроса."""
+
+    def __init__(self, parent, choice=None):
         super().__init__(parent)
-        self.title("Вопрос")
+        self.title("Вариант ответа")
         self.resizable(False, False)
         self.grab_set()
         self.result = None
 
-        ttk.Label(self, text="ID:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
-        self.id_var = tk.StringVar(value=str(question["id"]) if question else "")
-        ttk.Entry(self, textvariable=self.id_var, width=10).grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        ttk.Label(self, text="Текст ответа:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
+        self.text_var = tk.StringVar(value=choice["text"] if choice else "")
+        ttk.Entry(self, textvariable=self.text_var, width=30).grid(row=0, column=1, padx=5, pady=5, sticky="w")
 
-        ttk.Label(self, text="Текст вопроса:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
-        self.text_var = tk.StringVar(value=question["text"] if question else "")
-        ttk.Entry(self, textvariable=self.text_var, width=50).grid(row=1, column=1, padx=5, pady=5, sticky="w")
+        ttk.Label(self, text="Значение (0..1):").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+        self.value_var = tk.StringVar(value=str(choice["value"]) if choice else "0.5")
+        ttk.Entry(self, textvariable=self.value_var, width=10).grid(row=1, column=1, padx=5, pady=5, sticky="w")
 
         btn_frame = ttk.Frame(self)
         btn_frame.grid(row=2, column=0, columnspan=2, pady=10)
@@ -108,16 +111,102 @@ class QuestionDialog(tk.Toplevel):
         self.wait_window()
 
     def _ok(self):
-        try:
-            qid = int(self.id_var.get())
-        except ValueError:
-            messagebox.showerror("Ошибка", "ID должен быть целым числом.", parent=self)
+        text = self.text_var.get().strip()
+        if not text:
+            messagebox.showerror("Ошибка", "Текст ответа не может быть пустым.", parent=self)
             return
+        try:
+            value = float(self.value_var.get())
+            if not (0.0 <= value <= 1.0):
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Ошибка", "Значение должно быть числом от 0 до 1.", parent=self)
+            return
+        self.result = {"text": text, "value": value}
+        self.destroy()
+
+
+class QuestionDialog(tk.Toplevel):
+    """Диалог добавления/редактирования вопроса."""
+
+    def __init__(self, parent, question=None, next_id=None):
+        super().__init__(parent)
+        self.title("Вопрос")
+        self.resizable(False, False)
+        self.grab_set()
+        self.result = None
+
+        self._qid = question["id"] if question else next_id
+
+        ttk.Label(self, text="ID:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
+        ttk.Label(self, text=str(self._qid), font=("Arial", 10, "bold")).grid(
+            row=0, column=1, padx=5, pady=5, sticky="w"
+        )
+
+        ttk.Label(self, text="Текст вопроса:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+        self.text_var = tk.StringVar(value=question["text"] if question else "")
+        ttk.Entry(self, textvariable=self.text_var, width=50).grid(row=1, column=1, padx=5, pady=5, sticky="w")
+
+        ans_frame = ttk.LabelFrame(self, text="Варианты ответа")
+        ans_frame.grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
+
+        existing = question.get("answers", list(_DEFAULT_ANSWERS)) if question else list(_DEFAULT_ANSWERS)
+        self._answers = [dict(a) for a in existing]
+
+        self._listbox = tk.Listbox(ans_frame, height=4, width=40)
+        self._listbox.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+        self._refresh_list()
+
+        ans_btn = ttk.Frame(ans_frame)
+        ans_btn.pack(side="left", padx=5)
+        ttk.Button(ans_btn, text="Добавить", command=self._add_answer).pack(fill="x", pady=2)
+        ttk.Button(ans_btn, text="Редактировать", command=self._edit_answer).pack(fill="x", pady=2)
+        ttk.Button(ans_btn, text="Удалить", command=self._del_answer).pack(fill="x", pady=2)
+
+        btn_frame = ttk.Frame(self)
+        btn_frame.grid(row=3, column=0, columnspan=2, pady=10)
+        ttk.Button(btn_frame, text="OK", command=self._ok).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="Отмена", command=self.destroy).pack(side="left", padx=5)
+
+        self.transient(parent)
+        self.wait_window()
+
+    def _refresh_list(self):
+        self._listbox.delete(0, "end")
+        for a in self._answers:
+            self._listbox.insert("end", f"{a['text']}  (значение: {a['value']})")
+
+    def _add_answer(self):
+        dlg = AnswerChoiceDialog(self)
+        if dlg.result:
+            self._answers.append(dlg.result)
+            self._refresh_list()
+
+    def _edit_answer(self):
+        sel = self._listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        dlg = AnswerChoiceDialog(self, choice=self._answers[idx])
+        if dlg.result:
+            self._answers[idx] = dlg.result
+            self._refresh_list()
+
+    def _del_answer(self):
+        sel = self._listbox.curselection()
+        if sel:
+            del self._answers[sel[0]]
+            self._refresh_list()
+
+    def _ok(self):
         text = self.text_var.get().strip()
         if not text:
             messagebox.showerror("Ошибка", "Текст вопроса не может быть пустым.", parent=self)
             return
-        self.result = {"id": qid, "text": text}
+        if len(self._answers) < 2:
+            messagebox.showerror("Ошибка", "Необходимо не менее двух вариантов ответа.", parent=self)
+            return
+        self.result = {"id": self._qid, "text": text, "answers": self._answers}
         self.destroy()
 
 
@@ -340,7 +429,6 @@ class ConsultationTab(ttk.Frame):
         self._build_ui()
 
     def _build_ui(self):
-        # Левая панель — вопросы и слайдер
         left = ttk.Frame(self)
         left.pack(side="left", fill="both", expand=True, padx=5, pady=5)
 
@@ -350,20 +438,15 @@ class ConsultationTab(ttk.Frame):
         self.question_label = ttk.Label(left, text="", font=("Arial", 14), wraplength=400, justify="center")
         self.question_label.pack(pady=20)
 
-        self.slider_var = tk.IntVar(value=0)
-        self.slider = tk.Scale(left, from_=-5, to=5, orient="horizontal", variable=self.slider_var,
-                               length=300, tickinterval=1, command=self._on_slider_change)
-        self.slider.pack(pady=10)
-        self.slider.pack_forget()
+        self.answers_frame = ttk.LabelFrame(left, text="Варианты ответа")
+        self.answers_frame.pack(pady=5, fill="x", padx=10)
 
-        self.slider_label = ttk.Label(left, text="", font=("Arial", 11))
-        self.slider_label.pack()
+        self.selected_answer_idx = tk.IntVar(value=0)
 
         self.answer_btn = ttk.Button(left, text="Ответить", command=self._answer)
         self.answer_btn.pack(pady=10)
         self.answer_btn.pack_forget()
 
-        # Правая панель — вероятности
         right = ttk.LabelFrame(self, text="Вероятности исходов")
         right.pack(side="right", fill="both", padx=5, pady=5, ipadx=10)
 
@@ -381,7 +464,6 @@ class ConsultationTab(ttk.Frame):
             return
         self.current_q_idx = 0
         self.answers = {}
-        self.slider.pack(pady=10)
         self.answer_btn.pack(pady=10)
         self.start_btn.config(state="disabled")
         self._show_question()
@@ -390,22 +472,43 @@ class ConsultationTab(ttk.Frame):
     def _show_question(self):
         es = self.app.expert_system
         q = es.questions[self.current_q_idx]
-        self.question_label.config(text=f"Вопрос {self.current_q_idx + 1}/{len(es.questions)}:\n\n{q['text']}")
-        self.slider_var.set(0)
-        self.slider_label.config(text="Текущий ответ: 0")
+        self.question_label.config(
+            text=f"Вопрос {self.current_q_idx + 1}/{len(es.questions)}:\n\n{q['text']}"
+        )
 
-    def _on_slider_change(self, val):
-        self.slider_label.config(text=f"Текущий ответ: {int(float(val))}")
-        # Превью вероятностей с текущим ответом
-        self._update_probabilities(preview_answer=int(float(val)))
+        for widget in self.answers_frame.winfo_children():
+            widget.destroy()
 
-    def _update_probabilities(self, preview_answer=None):
+        choices = q.get("answers", list(_DEFAULT_ANSWERS))
+        self.selected_answer_idx.set(0)
+        for i, choice in enumerate(choices):
+            rb = ttk.Radiobutton(
+                self.answers_frame,
+                text=choice["text"],
+                variable=self.selected_answer_idx,
+                value=i,
+                command=self._on_answer_change,
+            )
+            rb.pack(anchor="w", padx=10, pady=2)
+
+        self._on_answer_change()
+
+    def _on_answer_change(self):
+        es = self.app.expert_system
+        if self.current_q_idx >= len(es.questions):
+            return
+        q = es.questions[self.current_q_idx]
+        choices = q.get("answers", list(_DEFAULT_ANSWERS))
+        idx = self.selected_answer_idx.get()
+        if 0 <= idx < len(choices):
+            self._update_probabilities(preview=(str(q["id"]), choices[idx]["value"]))
+
+    def _update_probabilities(self, preview=None):
         es = self.app.expert_system
         answers = dict(self.answers)
-        if preview_answer is not None and self.current_q_idx < len(es.questions):
-            qid = str(es.questions[self.current_q_idx]["id"])
-            answers[qid] = preview_answer
-
+        if preview is not None:
+            qid_str, value = preview
+            answers[qid_str] = value
         posteriors = es.compute_posteriors(answers)
         self.prob_tree.delete(*self.prob_tree.get_children())
         for name, prob in posteriors:
@@ -414,7 +517,10 @@ class ConsultationTab(ttk.Frame):
     def _answer(self):
         es = self.app.expert_system
         q = es.questions[self.current_q_idx]
-        self.answers[str(q["id"])] = self.slider_var.get()
+        choices = q.get("answers", list(_DEFAULT_ANSWERS))
+        idx = self.selected_answer_idx.get()
+        value = choices[idx]["value"] if 0 <= idx < len(choices) else 0.5
+        self.answers[str(q["id"])] = value
         self.current_q_idx += 1
 
         if self.current_q_idx < len(es.questions):
@@ -428,18 +534,20 @@ class ConsultationTab(ttk.Frame):
         posteriors = es.compute_posteriors(self.answers)
         self._update_probabilities()
 
-        self.slider.pack_forget()
+        for widget in self.answers_frame.winfo_children():
+            widget.destroy()
         self.answer_btn.pack_forget()
-        self.slider_label.config(text="")
         self.start_btn.config(state="normal")
 
         if posteriors:
             best_name, best_prob = posteriors[0]
-            result_text = f"Наиболее вероятный исход:\n\n{best_name}\n(вероятность: {best_prob * 100:.1f}%)"
-            self.question_label.config(text=result_text)
-            messagebox.showinfo("Результат консультации",
-                                f"Наиболее вероятный исход: {best_name}\n"
-                                f"Вероятность: {best_prob * 100:.1f}%")
+            self.question_label.config(
+                text=f"Наиболее вероятный исход:\n\n{best_name}\n(вероятность: {best_prob * 100:.1f}%)"
+            )
+            messagebox.showinfo(
+                "Результат консультации",
+                f"Наиболее вероятный исход: {best_name}\nВероятность: {best_prob * 100:.1f}%",
+            )
         else:
             self.question_label.config(text="Нет данных для вывода.")
 
@@ -449,10 +557,10 @@ class ConsultationTab(ttk.Frame):
 class TreeTab(ttk.Frame):
     """Вкладка для визуализации дерева решений."""
 
-    NODE_W = 140
-    NODE_H = 40
+    NODE_W = 160
+    NODE_H = 50
     H_GAP = 20
-    V_GAP = 60
+    V_GAP = 70
 
     def __init__(self, parent, app):
         super().__init__(parent)
@@ -463,6 +571,7 @@ class TreeTab(ttk.Frame):
         toolbar = ttk.Frame(self)
         toolbar.pack(fill="x", padx=5, pady=5)
         ttk.Button(toolbar, text="Построить дерево", command=self._draw_tree).pack(side="left")
+        ttk.Button(toolbar, text="Сохранить изображение", command=self._save_image).pack(side="left", padx=5)
 
         canvas_frame = ttk.Frame(self)
         canvas_frame.pack(fill="both", expand=True, padx=5, pady=5)
@@ -476,31 +585,93 @@ class TreeTab(ttk.Frame):
         self.v_scroll.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
 
+    def _outlined_text(self, x, y, text, **kwargs):
+        """Рисует текст с чёрной обводкой 1px и белым цветом."""
+        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            self.canvas.create_text(x + dx, y + dy, text=text, fill="black", **kwargs)
+        self.canvas.create_text(x, y, text=text, fill="white", **kwargs)
+
+    def _save_image(self):
+        if not self.canvas.find_all():
+            messagebox.showwarning("Внимание", "Сначала постройте дерево.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".png",
+            filetypes=[("PNG изображение", "*.png"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            import tempfile, os, subprocess
+            x1, y1, x2, y2 = self.canvas.bbox("all")
+            with tempfile.NamedTemporaryFile(suffix=".eps", delete=False) as tmp:
+                tmp_path = tmp.name
+            try:
+                scale = 3  # Увеличиваем разрешение в 3 раза
+                self.canvas.postscript(
+                    file=tmp_path,
+                    colormode="color",
+                    x=x1, y=y1,
+                    width=x2 - x1,
+                    height=y2 - y1,
+                    pagewidth=(x2 - x1) * scale,
+                    pageheight=(y2 - y1) * scale,
+                )
+                # Пробуем текущий интерпретатор, затем системный python3
+                converted = False
+                for python in [__import__("sys").executable, "python3"]:
+                    script = (
+                        f"from PIL import Image; "
+                        f"img = Image.open({tmp_path!r}); "
+                        f"img.load(); "
+                        f"img.save({path!r}, 'PNG')"
+                    )
+                    result = subprocess.run(
+                        [python, "-c", script],
+                        capture_output=True, text=True,
+                    )
+                    if result.returncode == 0:
+                        converted = True
+                        break
+                if not converted:
+                    raise RuntimeError(result.stderr.strip())
+            finally:
+                os.unlink(tmp_path)
+            messagebox.showinfo("Сохранено", f"Дерево сохранено в:\n{path}")
+        except Exception as e:
+            messagebox.showerror(
+                "Ошибка",
+                f"Не удалось сохранить: {e}\n\n"
+                "Убедитесь, что установлены Pillow и Ghostscript:\n"
+                "  pip install pillow\n"
+                "  brew install ghostscript",
+            )
+
     def _draw_tree(self):
         es = self.app.expert_system
         if not es.questions or not es.outcomes:
             messagebox.showwarning("Внимание", "Система должна содержать вопросы и исходы.")
             return
 
-        n_q = len(es.questions)
-        if n_q > 6:
-            if not messagebox.askyesno("Предупреждение",
-                                       f"Вопросов: {n_q}. Дерево будет содержать {2 ** n_q} листьев.\n"
-                                       "Построение может занять время. Продолжить?"):
+        n_leaves = 1
+        for q in es.questions:
+            n_leaves *= len(q.get("answers", _DEFAULT_ANSWERS))
+
+        if n_leaves > 64:
+            if not messagebox.askyesno(
+                "Предупреждение",
+                f"Дерево будет содержать {n_leaves} листьев.\n"
+                "Построение может занять время. Продолжить?",
+            ):
                 return
 
         self.canvas.delete("all")
 
-        # Вычисляем размеры дерева
-        n_leaves = 2 ** n_q
-        tree_w = n_leaves * (self.NODE_W + self.H_GAP)
+        n_q = len(es.questions)
+        tree_w = max(n_leaves * (self.NODE_W + self.H_GAP), self.NODE_W + self.H_GAP)
         tree_h = (n_q + 1) * (self.NODE_H + self.V_GAP) + 40
 
-        root_x = tree_w / 2
-        root_y = 30
-
-        self._draw_node(es, root_x, root_y, 0, {}, tree_w / 2)
-
+        self._draw_node(es, tree_w / 2, 30, 0, {}, tree_w / 2)
         self.canvas.configure(scrollregion=(0, 0, tree_w, tree_h))
 
     def _draw_node(self, es, x, y, q_idx, answers, half_width):
@@ -516,8 +687,8 @@ class TreeTab(ttk.Frame):
             self.canvas.create_rectangle(x - self.NODE_W // 2, y,
                                          x + self.NODE_W // 2, y + self.NODE_H,
                                          fill="#90EE90", outline="#2E8B57", width=2)
-            self.canvas.create_text(x, y + self.NODE_H // 2, text=text, font=("Arial", 8),
-                                    width=self.NODE_W - 10, justify="center")
+            self._outlined_text(x, y + self.NODE_H // 2, text,
+                                font=("Arial", 16), width=self.NODE_W - 10, justify="center")
             return
 
         q = es.questions[q_idx]
@@ -525,30 +696,24 @@ class TreeTab(ttk.Frame):
         self.canvas.create_rectangle(x - self.NODE_W // 2, y,
                                      x + self.NODE_W // 2, y + self.NODE_H,
                                      fill="#87CEEB", outline="#4682B4", width=2)
-        self.canvas.create_text(x, y + self.NODE_H // 2,
-                                text=f"Q{q['id']}: {q['text'][:18]}",
-                                font=("Arial", 8), width=self.NODE_W - 10, justify="center")
+        self._outlined_text(x, y + self.NODE_H // 2,
+                            f"Q{q['id']}: {q['text'][:18]}",
+                            font=("Arial", 16), width=self.NODE_W - 10, justify="center")
 
+        choices = q.get("answers", list(_DEFAULT_ANSWERS))
+        n = len(choices)
         child_y = y + self.NODE_H + self.V_GAP
-        child_half = half_width / 2
+        child_half = half_width / n
 
-        # Левая ветка: ответ = -5
-        left_x = x - child_half
-        left_answers = dict(answers)
-        left_answers[str(q["id"])] = -5
-        self.canvas.create_line(x, y + self.NODE_H, left_x, child_y, fill="#555")
-        self.canvas.create_text((x + left_x) / 2 - 10, (y + self.NODE_H + child_y) / 2,
-                                text="-5", font=("Arial", 8, "bold"), fill="#CC0000")
-        self._draw_node(es, left_x, child_y, q_idx + 1, left_answers, child_half)
-
-        # Правая ветка: ответ = +5
-        right_x = x + child_half
-        right_answers = dict(answers)
-        right_answers[str(q["id"])] = 5
-        self.canvas.create_line(x, y + self.NODE_H, right_x, child_y, fill="#555")
-        self.canvas.create_text((x + right_x) / 2 + 10, (y + self.NODE_H + child_y) / 2,
-                                text="+5", font=("Arial", 8, "bold"), fill="#006600")
-        self._draw_node(es, right_x, child_y, q_idx + 1, right_answers, child_half)
+        for i, choice in enumerate(choices):
+            child_x = x - half_width + child_half * (2 * i + 1)
+            child_answers = dict(answers)
+            child_answers[str(q["id"])] = choice.get("value", 0.5)
+            self.canvas.create_line(x, y + self.NODE_H, child_x, child_y, fill="#555")
+            mid_x = (x + child_x) / 2
+            mid_y = (y + self.NODE_H + child_y) / 2
+            self._outlined_text(mid_x, mid_y, choice["text"], font=("Arial", 16, "bold"))
+            self._draw_node(es, child_x, child_y, q_idx + 1, child_answers, child_half)
 
 
 # ─── Главное приложение ──────────────────────────────────────────────────────
