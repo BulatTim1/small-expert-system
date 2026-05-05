@@ -366,7 +366,9 @@ class EditorTab(ttk.Frame):
             self.o_tree.insert("", "end", values=(o["name"], f"{o.get('apriori', 0.5):.2f}"))
 
     def _add_question(self):
-        dlg = QuestionDialog(self)
+        existing_ids = [q["id"] for q in self.app.expert_system.questions]
+        next_id = max(existing_ids, default=0) + 1
+        dlg = QuestionDialog(self, next_id=next_id)
         if dlg.result:
             self.app.expert_system.questions.append(dlg.result)
             self._refresh_questions()
@@ -601,8 +603,19 @@ class TreeTab(ttk.Frame):
         )
         if not path:
             return
+    def _save_image(self):
+        if not self.canvas.find_all():
+            messagebox.showwarning("Внимание", "Сначала постройте дерево.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".png",
+            filetypes=[("PNG изображение", "*.png"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
         try:
-            import tempfile, os, subprocess
+            import tempfile, os
+            from PIL import Image
             x1, y1, x2, y2 = self.canvas.bbox("all")
             with tempfile.NamedTemporaryFile(suffix=".eps", delete=False) as tmp:
                 tmp_path = tmp.name
@@ -617,34 +630,20 @@ class TreeTab(ttk.Frame):
                     pagewidth=(x2 - x1) * scale,
                     pageheight=(y2 - y1) * scale,
                 )
-                # Пробуем текущий интерпретатор, затем системный python3
-                converted = False
-                for python in [__import__("sys").executable, "python3"]:
-                    script = (
-                        f"from PIL import Image; "
-                        f"img = Image.open({tmp_path!r}); "
-                        f"img.load(); "
-                        f"img.save({path!r}, 'PNG')"
-                    )
-                    result = subprocess.run(
-                        [python, "-c", script],
-                        capture_output=True, text=True,
-                    )
-                    if result.returncode == 0:
-                        converted = True
-                        break
-                if not converted:
-                    raise RuntimeError(result.stderr.strip())
+                img = Image.open(tmp_path)
+                img.load()
+                img.save(path, "PNG")
             finally:
-                os.unlink(tmp_path)
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
             messagebox.showinfo("Сохранено", f"Дерево сохранено в:\n{path}")
         except Exception as e:
             messagebox.showerror(
                 "Ошибка",
                 f"Не удалось сохранить: {e}\n\n"
-                "Убедитесь, что установлены Pillow и Ghostscript:\n"
-                "  pip install pillow\n"
-                "  brew install ghostscript",
+                "Убедитесь, что установлен Ghostscript:\n"
+                "  Windows: https://www.ghostscript.com/download\n"
+                "  macOS: brew install ghostscript",
             )
 
     def _draw_tree(self):
