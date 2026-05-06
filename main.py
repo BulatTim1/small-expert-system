@@ -557,25 +557,55 @@ class ConsultationTab(ttk.Frame):
 # ─── Вкладка «Дерево решений» ───────────────────────────────────────────────
 
 class TreeTab(ttk.Frame):
-    """Вкладка для визуализации дерева решений."""
+    """Вкладка для визуализации дерева решений с панелью фильтрации."""
 
-    NODE_W = 160
-    NODE_H = 50
-    H_GAP = 20
-    V_GAP = 70
+    NODE_W = 130
+    NODE_H = 70
+    H_GAP = 10
+    V_GAP = 140
 
     def __init__(self, parent, app):
         super().__init__(parent)
         self.app = app
+        self.filter_vars = {}    # {qid_str: tk.IntVar}  -1=все варианты, >=0=индекс ответа
+        self._known_q_ids = []
         self._build_ui()
 
     def _build_ui(self):
-        toolbar = ttk.Frame(self)
+        # ── Левая панель — фильтры ──
+        self.filter_panel = ttk.LabelFrame(self, text="Фильтр по ответам")
+        self.filter_panel.pack(side="left", fill="y", padx=(5, 0), pady=5)
+
+        # Прокручиваемая область для фильтров
+        filter_canvas = tk.Canvas(self.filter_panel, width=215, highlightthickness=0)
+        filter_scrollbar = ttk.Scrollbar(self.filter_panel, orient="vertical", command=filter_canvas.yview)
+        filter_canvas.configure(yscrollcommand=filter_scrollbar.set)
+        filter_scrollbar.pack(side="right", fill="y")
+        filter_canvas.pack(side="left", fill="both", expand=True)
+
+        self.filter_inner = ttk.Frame(filter_canvas)
+        self._filter_win_id = filter_canvas.create_window((0, 0), window=self.filter_inner, anchor="nw")
+
+        self.filter_inner.bind(
+            "<Configure>",
+            lambda e: filter_canvas.configure(scrollregion=filter_canvas.bbox("all")),
+        )
+        filter_canvas.bind(
+            "<Configure>",
+            lambda e: filter_canvas.itemconfig(self._filter_win_id, width=e.width),
+        )
+        self._filter_canvas = filter_canvas
+
+        # ── Правая часть — тулбар + холст дерева ──
+        right = ttk.Frame(self)
+        right.pack(side="left", fill="both", expand=True)
+
+        toolbar = ttk.Frame(right)
         toolbar.pack(fill="x", padx=5, pady=5)
         ttk.Button(toolbar, text="Построить дерево", command=self._draw_tree).pack(side="left")
         ttk.Button(toolbar, text="Сохранить изображение", command=self._save_image).pack(side="left", padx=5)
 
-        canvas_frame = ttk.Frame(self)
+        canvas_frame = ttk.Frame(right)
         canvas_frame.pack(fill="both", expand=True, padx=5, pady=5)
 
         self.canvas = tk.Canvas(canvas_frame, bg="white")
@@ -587,22 +617,73 @@ class TreeTab(ttk.Frame):
         self.v_scroll.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
 
-    def _outlined_text(self, x, y, text, **kwargs):
-        """Рисует текст с чёрной обводкой 1px и белым цветом."""
-        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            self.canvas.create_text(x + dx, y + dy, text=text, fill="black", **kwargs)
-        self.canvas.create_text(x, y, text=text, fill="white", **kwargs)
+    def _build_filter_panel(self):
+        """Перестраивает элементы фильтрации по текущим вопросам системы."""
+        for widget in self.filter_inner.winfo_children():
+            widget.destroy()
+        self.filter_vars = {}     # {qid_str: tk.StringVar}
+        self.filter_choices = {}  # {qid_str: [answers]}
 
-    def _save_image(self):
-        if not self.canvas.find_all():
-            messagebox.showwarning("Внимание", "Сначала постройте дерево.")
-            return
-        path = filedialog.asksaveasfilename(
-            defaultextension=".png",
-            filetypes=[("PNG изображение", "*.png"), ("Все файлы", "*.*")],
-        )
-        if not path:
-            return
+        es = self.app.expert_system
+        for q in es.questions:
+            qid_str = str(q["id"])
+            answers = q.get("answers", [])
+            self.filter_choices[qid_str] = answers
+
+            ttk.Label(
+                self.filter_inner,
+                text=f"Q{q['id']}: {q['text']}",
+                wraplength=195,
+                font=("Arial", 9, "bold"),
+                justify="left",
+            ).pack(anchor="w", padx=4, pady=(10, 2))
+
+            _ALL = "— Все варианты —"
+            values = [_ALL] + [a["text"] for a in answers]
+            var = tk.StringVar(value=_ALL)
+            self.filter_vars[qid_str] = var
+
+            cb = ttk.Combobox(
+                self.filter_inner,
+                textvariable=var,
+                values=values,
+                state="readonly",
+                width=26,
+            )
+            cb.pack(anchor="w", padx=4, pady=2)
+            cb.bind("<<ComboboxSelected>>", lambda e: self._draw_tree())
+
+            ttk.Separator(self.filter_inner, orient="horizontal").pack(fill="x", padx=4, pady=6)
+
+    def _get_active_filters(self):
+        """Возвращает {qid_str: answer_index} для активных (не «все») фильтров."""
+        _ALL = "— Все варианты —"
+        result = {}
+        for qid, var in self.filter_vars.items():
+            sel = var.get()
+            if sel == _ALL:
+                continue
+            choices = self.filter_choices.get(qid, [])
+            for i, a in enumerate(choices):
+                if a["text"] == sel:
+                    result[qid] = i
+                    break
+        return result
+
+    def _calc_effective_leaves(self, es, active_filters):
+        """Число листьев дерева с учётом активных фильтров."""
+        n = 1
+        for q in es.questions:
+            if str(q["id"]) not in active_filters:
+                n *= len(q.get("answers", _DEFAULT_ANSWERS))
+        return max(n, 1)
+
+    def _outlined_text(self, x, y, text, fill="white", outline_color="black", **kwargs):
+        """Рисует текст с однопиксельной обводкой."""
+        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            self.canvas.create_text(x + dx, y + dy, text=text, fill=outline_color, **kwargs)
+        self.canvas.create_text(x, y, text=text, fill=fill, **kwargs)
+
     def _save_image(self):
         if not self.canvas.find_all():
             messagebox.showwarning("Внимание", "Сначала постройте дерево.")
@@ -621,6 +702,8 @@ class TreeTab(ttk.Frame):
             if not es.questions or not es.outcomes:
                 return
 
+            active_filters = self._get_active_filters()
+
             SCALE = 2
             NW = self.NODE_W * SCALE
             NH = self.NODE_H * SCALE
@@ -628,14 +711,11 @@ class TreeTab(ttk.Frame):
             VGAP = self.V_GAP * SCALE
             FONT_SIZE = 16 * SCALE
 
-            n_leaves = 1
-            for q in es.questions:
-                n_leaves *= len(q.get("answers", _DEFAULT_ANSWERS))
+            n_leaves = self._calc_effective_leaves(es, active_filters)
             n_q = len(es.questions)
             tree_w = int(max(n_leaves * (NW + HGAP), NW + HGAP))
             tree_h = int((n_q + 1) * (NH + VGAP) + 80 * SCALE)
 
-            # Пробуем загрузить системный шрифт; если не удастся — встроенный
             font = None
             for fp in [
                 "C:/Windows/Fonts/arial.ttf",
@@ -655,14 +735,14 @@ class TreeTab(ttk.Frame):
             img = Image.new("RGB", (tree_w, tree_h), "white")
             draw = ImageDraw.Draw(img)
 
-            def outlined_text(x, y, text):
+            def pil_text(x, y, text, fill="white", outline="#000000"):
                 for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                     draw.multiline_text(
-                        (x + dx, y + dy), text, fill="black",
+                        (x + dx, y + dy), text, fill=outline,
                         font=font, anchor="mm", align="center",
                     )
                 draw.multiline_text(
-                    (x, y), text, fill="white",
+                    (x, y), text, fill=fill,
                     font=font, anchor="mm", align="center",
                 )
 
@@ -671,7 +751,7 @@ class TreeTab(ttk.Frame):
                 if q_idx >= len(es.questions):
                     posteriors = es.compute_posteriors(answers)
                     if posteriors:
-                        name = '\n'.join(textwrap.wrap(posteriors[0][0], 18))
+                        name = "\n".join(textwrap.wrap(posteriors[0][0], 18))
                         text = f"{name}\n{posteriors[0][1] * 100:.1f}%"
                     else:
                         text = "?"
@@ -679,32 +759,47 @@ class TreeTab(ttk.Frame):
                         [x - NW // 2, y, x + NW // 2, y + NH],
                         fill="#90EE90", outline="#2E8B57", width=2 * SCALE,
                     )
-                    outlined_text(x, y + NH // 2, text)
+                    pil_text(x, y + NH // 2, text)
                     return
 
                 q = es.questions[q_idx]
+                qid_str = str(q["id"])
+                filter_idx = active_filters.get(qid_str, None)
+
                 label = "\n".join(textwrap.wrap(f"Q{q['id']}: {q['text']}", 20))
                 draw.rectangle(
                     [x - NW // 2, y, x + NW // 2, y + NH],
                     fill="#87CEEB", outline="#4682B4", width=2 * SCALE,
                 )
-                outlined_text(x, y + NH // 2, label)
+                pil_text(x, y + NH // 2, label)
 
                 choices = q.get("answers", list(_DEFAULT_ANSWERS))
-                n = len(choices)
+                if filter_idx is not None and 0 <= filter_idx < len(choices):
+                    displayed = [(filter_idx, choices[filter_idx])]
+                    n_eff = 1
+                else:
+                    displayed = list(enumerate(choices))
+                    n_eff = len(choices)
+
                 child_y = y + NH + VGAP
-                child_half = half_width / n
-                for i, choice in enumerate(choices):
-                    child_x = x - half_width + child_half * (2 * i + 1)
+                child_half = half_width / n_eff
+                for slot, (orig_idx, choice) in enumerate(displayed):
+                    child_x = x - half_width + child_half * (2 * slot + 1)
                     child_answers = dict(answers)
-                    child_answers[str(q["id"])] = choice.get("value", 0.5)
+                    child_answers[qid_str] = choice.get("value", 0.5)
+                    is_sel = filter_idx is not None and orig_idx == filter_idx
+                    line_color = "#1565C0" if is_sel else "#555555"
+                    line_w = 3 * SCALE if is_sel else SCALE
                     draw.line(
                         [(x, y + NH), (int(child_x), int(child_y))],
-                        fill="#555555", width=SCALE,
+                        fill=line_color, width=line_w,
                     )
                     mid_x = int((x + child_x) / 2)
                     mid_y = int((y + NH + child_y) / 2)
-                    outlined_text(mid_x, mid_y, choice["text"])
+                    if is_sel:
+                        pil_text(mid_x, mid_y, choice["text"], fill="#FFD600", outline="#1565C0")
+                    else:
+                        pil_text(mid_x, mid_y, choice["text"])
                     draw_node(child_x, child_y, q_idx + 1, child_answers, child_half)
 
             draw_node(tree_w / 2, 30 * SCALE, 0, {}, tree_w / 2)
@@ -719,67 +814,133 @@ class TreeTab(ttk.Frame):
             messagebox.showwarning("Внимание", "Система должна содержать вопросы и исходы.")
             return
 
-        n_leaves = 1
-        for q in es.questions:
-            n_leaves *= len(q.get("answers", _DEFAULT_ANSWERS))
+        # Перестроить панель фильтров, если состав вопросов изменился
+        current_q_ids = [q["id"] for q in es.questions]
+        if current_q_ids != self._known_q_ids:
+            self._build_filter_panel()
+            self._known_q_ids = list(current_q_ids)
 
-        if n_leaves > 64:
-            if not messagebox.askyesno(
-                "Предупреждение",
-                f"Дерево будет содержать {n_leaves} листьев.\n"
-                "Построение может занять время. Продолжить?",
-            ):
-                return
+        active_filters = self._get_active_filters()
+        effective_leaves = self._calc_effective_leaves(es, active_filters)
 
         self.canvas.delete("all")
 
         n_q = len(es.questions)
-        tree_w = max(n_leaves * (self.NODE_W + self.H_GAP), self.NODE_W + self.H_GAP)
+        tree_w = max(effective_leaves * (self.NODE_W + self.H_GAP), self.NODE_W + self.H_GAP)
         tree_h = (n_q + 1) * (self.NODE_H + self.V_GAP) + 40
 
-        self._draw_node(es, tree_w / 2, 30, 0, {}, tree_w / 2)
-        self.canvas.configure(scrollregion=(0, 0, tree_w, tree_h))
+        # Центрируем дерево: если оно уже холста — отступ по центру
+        canvas_w = self.canvas.winfo_width() or 600
+        margin = max((canvas_w - tree_w) / 2, 0)
+        root_x = margin + tree_w / 2
+        full_w = margin + tree_w + margin
 
-    def _draw_node(self, es, x, y, q_idx, answers, half_width):
-        """Рекурсивно рисует узлы дерева."""
+        self._draw_node(es, root_x, 30, 0, {}, tree_w / 2, active_filters)
+        self.canvas.configure(scrollregion=(0, 0, full_w, tree_h))
+
+    def _draw_node(self, es, x, y, q_idx, answers, half_width, active_filters):
+        """Рекурсивно рисует узлы дерева с учётом активных фильтров."""
         if q_idx >= len(es.questions):
-            # Лист — показать лучший исход
             posteriors = es.compute_posteriors(answers)
             if posteriors:
                 best_name, best_prob = posteriors[0]
-                text = f"{best_name}\n{best_prob * 100:.1f}%"
+                # Обрезаем длинное название до 2 строк по ~20 символов
+                words = best_name.split()
+                lines, cur = [], ""
+                for w in words:
+                    if len(cur) + len(w) + 1 > 20:
+                        lines.append(cur.rstrip())
+                        cur = w + " "
+                        if len(lines) == 2:
+                            break
+                    else:
+                        cur += w + " "
+                else:
+                    lines.append(cur.rstrip())
+                short_name = "\n".join(lines[:2])
+                if len(lines) > 2 or len(" ".join(words)) > len(" ".join(lines[:2].copy())):
+                    short_name = short_name.rstrip() + "…"
+                text = f"{short_name}\n{best_prob * 100:.1f}%"
             else:
                 text = "?"
-            self.canvas.create_rectangle(x - self.NODE_W // 2, y,
-                                         x + self.NODE_W // 2, y + self.NODE_H,
-                                         fill="#90EE90", outline="#2E8B57", width=2)
+            self.canvas.create_rectangle(
+                x - self.NODE_W // 2, y, x + self.NODE_W // 2, y + self.NODE_H,
+                fill="#90EE90", outline="#2E8B57", width=2,
+            )
             self._outlined_text(x, y + self.NODE_H // 2, text,
-                                font=("Arial", 16), width=self.NODE_W - 10, justify="center")
+                                 font=("Arial", 11), width=self.NODE_W - 10, justify="center")
             return
 
         q = es.questions[q_idx]
-        # Рисуем узел вопроса
-        self.canvas.create_rectangle(x - self.NODE_W // 2, y,
-                                     x + self.NODE_W // 2, y + self.NODE_H,
-                                     fill="#87CEEB", outline="#4682B4", width=2)
+        qid_str = str(q["id"])
+        filter_idx = active_filters.get(qid_str, None)
+
+        # Обрезаем текст вопроса до 2 строк по ~20 символов
+        q_words = q["text"].split()
+        q_lines, q_cur = [], ""
+        for w in q_words:
+            if len(q_cur) + len(w) + 1 > 20:
+                q_lines.append(q_cur.rstrip())
+                q_cur = w + " "
+                if len(q_lines) == 2:
+                    break
+            else:
+                q_cur += w + " "
+        else:
+            q_lines.append(q_cur.rstrip())
+        q_short = "\n".join(q_lines[:2])
+        if len(q_lines) > 2 or len(q["text"]) > len(" ".join(q_lines[:2])):
+            q_short = q_short.rstrip() + "…"
+        node_label = f"Q{q['id']}: {q_short}"
+
+        self.canvas.create_rectangle(
+            x - self.NODE_W // 2, y, x + self.NODE_W // 2, y + self.NODE_H,
+            fill="#87CEEB", outline="#4682B4", width=2,
+        )
         self._outlined_text(x, y + self.NODE_H // 2,
-                            f"Q{q['id']}: {q['text'][:18]}",
-                            font=("Arial", 16), width=self.NODE_W - 10, justify="center")
+                             node_label,
+                             font=("Arial", 11), width=self.NODE_W - 10, justify="center")
 
         choices = q.get("answers", list(_DEFAULT_ANSWERS))
-        n = len(choices)
-        child_y = y + self.NODE_H + self.V_GAP
-        child_half = half_width / n
+        if filter_idx is not None and 0 <= filter_idx < len(choices):
+            displayed = [(filter_idx, choices[filter_idx])]
+            n_eff = 1
+        else:
+            displayed = list(enumerate(choices))
+            n_eff = len(choices)
 
-        for i, choice in enumerate(choices):
-            child_x = x - half_width + child_half * (2 * i + 1)
+        child_y = y + self.NODE_H + self.V_GAP
+        child_half = half_width / n_eff
+
+        for slot, (orig_idx, choice) in enumerate(displayed):
+            child_x = x - half_width + child_half * (2 * slot + 1)
             child_answers = dict(answers)
-            child_answers[str(q["id"])] = choice.get("value", 0.5)
-            self.canvas.create_line(x, y + self.NODE_H, child_x, child_y, fill="#555")
+            child_answers[qid_str] = choice.get("value", 0.5)
+
+            is_sel = filter_idx is not None and orig_idx == filter_idx
+            if is_sel:
+                self.canvas.create_line(
+                    x, y + self.NODE_H, child_x, child_y,
+                    fill="#1565C0", width=3,
+                )
+            else:
+                self.canvas.create_line(x, y + self.NODE_H, child_x, child_y, fill="#555")
+
             mid_x = (x + child_x) / 2
             mid_y = (y + self.NODE_H + child_y) / 2
-            self._outlined_text(mid_x, mid_y, choice["text"], font=("Arial", 16, "bold"))
-            self._draw_node(es, child_x, child_y, q_idx + 1, child_answers, child_half)
+            label = choice["text"]
+            if len(label) > 15:
+                label = label[:14] + "\u2026"
+            if is_sel:
+                self._outlined_text(
+                    mid_x, mid_y, label,
+                    fill="#FFD600", outline_color="#1565C0",
+                    font=("Arial", 8, "bold"),
+                )
+            else:
+                self._outlined_text(mid_x, mid_y, label, font=("Arial", 8, "bold"))
+
+            self._draw_node(es, child_x, child_y, q_idx + 1, child_answers, child_half, active_filters)
 
 
 # ─── Главное приложение ──────────────────────────────────────────────────────
