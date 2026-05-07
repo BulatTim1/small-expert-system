@@ -50,10 +50,8 @@ class ExpertSystem:
         if n == 0:
             return []
 
-        # Априорные вероятности
-        priors = []
-        for o in self.outcomes:
-            priors.append(o.get("apriori", 1.0 / n))
+        # Априорные вероятности — равномерные (1/n)
+        priors = [1.0 / n for _ in self.outcomes]
 
         # Логарифмическое правдоподобие для числовой стабильности
         log_posteriors = [math.log(max(p, 1e-15)) for p in priors]
@@ -216,33 +214,59 @@ class OutcomeDialog(tk.Toplevel):
     def __init__(self, parent, questions, outcome=None):
         super().__init__(parent)
         self.title("Исход")
-        self.resizable(False, False)
+        self.resizable(True, True)
         self.grab_set()
         self.result = None
 
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(1, weight=1)
+
         ttk.Label(self, text="Название:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
         self.name_var = tk.StringVar(value=outcome["name"] if outcome else "")
-        ttk.Entry(self, textvariable=self.name_var, width=30).grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        ttk.Entry(self, textvariable=self.name_var, width=30).grid(row=0, column=1, padx=5, pady=5, sticky="ew")
 
-        ttk.Label(self, text="Априорная вероятность:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
-        self.apriori_var = tk.StringVar(value=str(outcome.get("apriori", 0.5)) if outcome else "0.5")
-        ttk.Entry(self, textvariable=self.apriori_var, width=10).grid(row=1, column=1, padx=5, pady=5, sticky="w")
+        # Коэффициенты — прокручиваемый список
+        coeff_outer = ttk.LabelFrame(self, text="Коэффициенты P(E=да | H) — от 0 до 1")
+        coeff_outer.grid(row=1, column=0, columnspan=2, padx=5, pady=5, sticky="nsew")
+        coeff_outer.columnconfigure(0, weight=1)
+        coeff_outer.rowconfigure(0, weight=1)
 
-        # Коэффициенты
-        coeff_frame = ttk.LabelFrame(self, text="Коэффициенты P(E=да | H) — от 0 до 1")
-        coeff_frame.grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
+        coeff_canvas = tk.Canvas(coeff_outer, highlightthickness=0)
+        coeff_scroll = ttk.Scrollbar(coeff_outer, orient="vertical", command=coeff_canvas.yview)
+        coeff_canvas.configure(yscrollcommand=coeff_scroll.set)
+        coeff_scroll.pack(side="right", fill="y")
+        coeff_canvas.pack(side="left", fill="both", expand=True)
+
+        coeff_inner = ttk.Frame(coeff_canvas)
+        win_id = coeff_canvas.create_window((0, 0), window=coeff_inner, anchor="nw")
+
+        def _on_inner_configure(e):
+            coeff_canvas.configure(scrollregion=coeff_canvas.bbox("all"))
+        def _on_canvas_configure(e):
+            coeff_canvas.itemconfig(win_id, width=e.width)
+        coeff_inner.bind("<Configure>", _on_inner_configure)
+        coeff_canvas.bind("<Configure>", _on_canvas_configure)
 
         self.coeff_vars = {}
         existing_coeffs = outcome.get("coefficients", {}) if outcome else {}
         for i, q in enumerate(questions):
             qid_str = str(q["id"])
-            ttk.Label(coeff_frame, text=f"Q{q['id']}: {q['text'][:40]}").grid(row=i, column=0, padx=5, pady=2, sticky="w")
+            ttk.Label(
+                coeff_inner,
+                text=f"Q{q['id']}: {q['text']}",
+                wraplength=260,
+                justify="left",
+            ).grid(row=i, column=0, padx=5, pady=2, sticky="w")
             var = tk.StringVar(value=str(existing_coeffs.get(qid_str, "0.5")))
-            ttk.Entry(coeff_frame, textvariable=var, width=8).grid(row=i, column=1, padx=5, pady=2)
+            ttk.Entry(coeff_inner, textvariable=var, width=8).grid(row=i, column=1, padx=5, pady=2)
             self.coeff_vars[qid_str] = var
 
+        # Ограничиваем высоту прокручиваемой области
+        visible_rows = min(len(questions), 8)
+        coeff_canvas.configure(height=visible_rows * 30 + 10)
+
         btn_frame = ttk.Frame(self)
-        btn_frame.grid(row=3, column=0, columnspan=2, pady=10)
+        btn_frame.grid(row=2, column=0, columnspan=2, pady=10)
         ttk.Button(btn_frame, text="OK", command=self._ok).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="Отмена", command=self.destroy).pack(side="left", padx=5)
 
@@ -253,13 +277,6 @@ class OutcomeDialog(tk.Toplevel):
         name = self.name_var.get().strip()
         if not name:
             messagebox.showerror("Ошибка", "Название не может быть пустым.", parent=self)
-            return
-        try:
-            apriori = float(self.apriori_var.get())
-            if not (0 < apriori <= 1):
-                raise ValueError
-        except ValueError:
-            messagebox.showerror("Ошибка", "Априорная вероятность — число от 0 до 1.", parent=self)
             return
 
         coefficients = {}
@@ -273,7 +290,7 @@ class OutcomeDialog(tk.Toplevel):
                 messagebox.showerror("Ошибка", f"Коэффициент для Q{qid_str} должен быть числом от 0 до 1.", parent=self)
                 return
 
-        self.result = {"name": name, "apriori": apriori, "coefficients": coefficients}
+        self.result = {"name": name, "coefficients": coefficients}
         self.destroy()
 
 
@@ -362,8 +379,10 @@ class EditorTab(ttk.Frame):
 
     def _refresh_outcomes(self):
         self.o_tree.delete(*self.o_tree.get_children())
+        n = len(self.app.expert_system.outcomes)
+        apriori = 1.0 / n if n > 0 else 0.0
         for o in self.app.expert_system.outcomes:
-            self.o_tree.insert("", "end", values=(o["name"], f"{o.get('apriori', 0.5):.2f}"))
+            self.o_tree.insert("", "end", values=(o["name"], f"{apriori:.2f}"))
 
     def _add_question(self):
         existing_ids = [q["id"] for q in self.app.expert_system.questions]
@@ -569,6 +588,7 @@ class TreeTab(ttk.Frame):
         self.app = app
         self.filter_vars = {}    # {qid_str: tk.IntVar}  -1=все варианты, >=0=индекс ответа
         self._known_q_ids = []
+        self.show_prob_var = tk.BooleanVar(value=True)
         self._build_ui()
 
     def _build_ui(self):
@@ -604,6 +624,12 @@ class TreeTab(ttk.Frame):
         toolbar.pack(fill="x", padx=5, pady=5)
         ttk.Button(toolbar, text="Построить дерево", command=self._draw_tree).pack(side="left")
         ttk.Button(toolbar, text="Сохранить изображение", command=self._save_image).pack(side="left", padx=5)
+        ttk.Checkbutton(
+            toolbar,
+            text="Показывать вероятности",
+            variable=self.show_prob_var,
+            command=self._draw_tree,
+        ).pack(side="left", padx=10)
 
         canvas_frame = ttk.Frame(right)
         canvas_frame.pack(fill="both", expand=True, padx=5, pady=5)
@@ -703,6 +729,7 @@ class TreeTab(ttk.Frame):
                 return
 
             active_filters = self._get_active_filters()
+            show_prob = self.show_prob_var.get()
 
             SCALE = 2
             NW = self.NODE_W * SCALE
@@ -752,7 +779,10 @@ class TreeTab(ttk.Frame):
                     posteriors = es.compute_posteriors(answers)
                     if posteriors:
                         name = "\n".join(textwrap.wrap(posteriors[0][0], 18))
-                        text = f"{name}\n{posteriors[0][1] * 100:.1f}%"
+                        if show_prob:
+                            text = f"{name}\n{posteriors[0][1] * 100:.1f}%"
+                        else:
+                            text = name
                     else:
                         text = "?"
                     draw.rectangle(
@@ -860,7 +890,10 @@ class TreeTab(ttk.Frame):
                 short_name = "\n".join(lines[:2])
                 if len(lines) > 2 or len(" ".join(words)) > len(" ".join(lines[:2].copy())):
                     short_name = short_name.rstrip() + "…"
-                text = f"{short_name}\n{best_prob * 100:.1f}%"
+                if self.show_prob_var.get():
+                    text = f"{short_name}\n{best_prob * 100:.1f}%"
+                else:
+                    text = short_name
             else:
                 text = "?"
             self.canvas.create_rectangle(
